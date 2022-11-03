@@ -1,0 +1,133 @@
+clear all
+close all
+
+df=xlsread("SX5E_Impliedvols.xlsx");
+strikes=df(2:end,1);
+maturities=df(1,2:end);
+data_vols=df(2:end,2:end);
+S_0=1000;
+strikes=S_0*strikes;
+
+%% Create call option matrix where volatility data exists
+
+data_prices=zeros(size(data_vols));
+for j=1:length(maturities)
+    for i=1:length(strikes)
+        if data_vols(i,j)>0
+            data_prices(i,j)=BSoptionprice(S_0,strikes(i,1),data_vols(i,j),0,maturities(1,j),0);
+        end
+    end
+end
+
+%% Create call option prices by iteration. Follows lecture 6 notes.
+
+C_0=max(S_0-strikes,0);
+C=horzcat(C_0,data_prices);
+maturities=horzcat(0,maturities);
+dt=diff(maturities);
+dK=strikes(2)-strikes(1);
+
+for j=1:length(maturities)-1
+    nonzero_indices=find(data_vols(:,j));
+    positive_data_vols=data_vols(:,j)>0;
+    fun=@(local_vol) sum(positive_data_vols.*(Andreasen_Huge(local_vol,nonzero_indices,C(:,j),strikes,dt(j),dK)-C(:,j+1)).^2);
+    lower_bound = zeros(length(nonzero_indices),1); 
+    upper_bound = S_0*ones(length(nonzero_indices),1);
+    local_vols_start_guess = 0.3*S_0*ones(length(nonzero_indices),1);
+    local_vols{j}= fmincon(fun,local_vols_start_guess,[],[],[],[],lower_bound,upper_bound);
+    C(:,j+1) = Andreasen_Huge(local_vols{j},nonzero_indices,C(:,j),strikes,dt(j),dK);
+end
+
+
+%% Finally, inverting the BS call option formula to obtain implied volatilities.
+
+impvols=zeros(length(strikes),length(maturities)-1);
+
+for j=1:length(maturities)-1
+    for i=1:length(strikes)
+        fun=@(x) (BSoptionprice(S_0,strikes(i),x,0,maturities(j+1),0)-C(i,j+1))^2;
+        if j>1
+            impvol_start_guess=impvols(i,j-1);
+        else
+            impvol_start_guess=0.7;          % Lower start guesses don't find the implied volatility for the first maturity.
+        end
+        impvols(i,j)=fminsearch(fun,impvol_start_guess);
+    end
+end
+
+
+%% Constructing implied volatility at T=1 and T=1.5 based on calibration at maturities where data exist
+
+C_1=zeros(length(maturities),1);
+C_15=zeros(length(maturities),1);
+dt1=1-.7720;                                                                    % .7720 is the last maturity in the data before 1 and 1.5.
+dt15=1.5-.7720;
+C_1=Andreasen_Huge(local_vols{6},nonzero_indices,C(:,7),strikes,dt1,dK);        % We use the same parameters for local volatility as calibrated previously
+C_15=Andreasen_Huge(local_vols{6},nonzero_indices,C(:,7),strikes,dt15,dK);
+impvols1=zeros(length(strikes),1);
+impvols15=zeros(length(strikes),1);
+
+for i=1:length(strikes)
+    fun1=@(x) (BSoptionprice(S_0,strikes(i),x,0,1,0)-C(i,7))^2;
+    fun15=@(x) (BSoptionprice(S_0,strikes(i),x,0,1.5,0)-C(i,7))^2;
+    impvol_start_guess=impvols(i,6);
+    impvols1(i)=fminsearch(fun1,impvol_start_guess);
+    impvols15(i)=fminsearch(fun15,impvol_start_guess);
+end
+
+%% Plotting
+
+figure
+mesh(strikes/S_0,maturities(2:end)',impvols')
+title('Implied volatility surface')
+zlabel('$\sigma_{implied}$',Interpreter='latex')
+xlabel("$K/S_0$",Interpreter="latex")
+ylabel('T',Interpreter='latex')
+
+figure
+plot(strikes/S_0,impvols1)
+hold on
+plot(strikes/S_0,impvols15)
+title('Implied volatilities of $T=1$ and $T=1.5$',Interpreter='latex')
+legend('T=1','T=1.5')
+ylabel('$\sigma_{implied}$',Interpreter='latex')
+xlabel("$K/S_0$",Interpreter="latex")
+
+
+%% Functions, Andreasen-Huge algorithm and BS call option pricing formula below.
+
+function call_price=Andreasen_Huge(local_vol,nonzero_indices,C,K,dt,dK)
+ 
+local_vols=zeros(length(K));
+midpoints = int16((nonzero_indices(1:end-1,1) + nonzero_indices(2:end,1)) / 2);
+kk = 1;
+
+for i = 1:length(midpoints)
+    while kk < midpoints(i)
+        local_vols(kk) = local_vol(i);
+        kk = kk+1;
+    end
+    
+end
+local_vols(kk:end) = local_vol(end);
+
+z=zeros(length(K)-2,1);
+A=zeros(length(K));
+A(1,1)=1;
+A(end,end)=1;
+
+for i=2:length(K)-1
+    z=0.5*dt/dK^2*local_vols(i)^2;
+    A(i,i-1)=-z;
+    A(i,i)=1+2*z;
+    A(i,i+1)=-z;
+end
+call_price=A\C;
+end
+
+
+function price=BSoptionprice(S,K,sigma,r,T,q)
+d_1=(log(S/K)+(r-q+0.5*sigma^2)*T)/(sqrt(T)*sigma);
+d_2=d_1-sqrt(T)*sigma;
+price=exp(-q*T)*S*normcdf(d_1)-K*exp(-r*T)*normcdf(d_2);
+end
